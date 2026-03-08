@@ -310,7 +310,10 @@ class DbusRenogySolarService:
         self._dbusservice.add_path("/ProductId", 0)
         self._dbusservice.add_path("/ProductName", PRODUCT_NAME)
         self._dbusservice.add_path("/CustomName", PRODUCT_NAME)
-        self._dbusservice.add_path("/FirmwareVersion", VERSION)
+        # DVCC expects an integer firmware version (major<<16 | minor<<8 | patch)
+        fw_parts = [int(x) for x in VERSION.split(".")]
+        fw_int = (fw_parts[0] << 16) | (fw_parts[1] << 8) | fw_parts[2]
+        self._dbusservice.add_path("/FirmwareVersion", fw_int)
         self._dbusservice.add_path("/HardwareVersion", 0)
         self._dbusservice.add_path("/Serial", "")
         self._dbusservice.add_path("/Connected", 0)
