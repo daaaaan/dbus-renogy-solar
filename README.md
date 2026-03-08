@@ -47,17 +47,6 @@ The Renogy Rover Boost has an RJ45 RS485 port. Wire it to your USB-RS485 adapter
 | 8 | +5V | Brown | ⚠️ Do NOT connect |
 | 1–4 | CAN bus | — | Not used |
 
-**RS485 adapter wiring example** (4-pin screw terminal adapter with White/Green/Red/Black wires):
-
-| Adapter wire | Connect to |
-|---|---|
-| White (A+) | RJ45 pin 7 (Brown/White) |
-| Green (B−) | RJ45 pin 6 (Green) |
-| Black (GND) | RJ45 pin 5 (Blue/White) |
-| Red (VCC/5V) | Not connected |
-
----
-
 ## Installation
 
 ### 1. Copy files to the Cerbo GX
