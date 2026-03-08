@@ -8,10 +8,12 @@ and publishes it as a com.victronenergy.solarcharger service on dbus.
 Tested with: Renogy Rover Boost 10A 36V/48V (RCC10RVRB)
 Connection: USB-to-RS485 adapter → Rover Boost RS485 port (RJ45)
 
-RS485 RJ45 pinout:
-  Pin 1: TX/RX+ (RS485-A)
-  Pin 2: TX/RX- (RS485-B)
-  Pin 5: GND
+RS485 RJ45 pinout (from official Renogy manual):
+  Pin 1: +5V (do NOT connect to RS485 adapter)
+  Pin 2: RS485-A (TX/RX+)  — Orange wire (T-568B)
+  Pin 3: RS485-B (TX/RX-)  — White/Green wire (T-568B)
+  Pin 4: GND               — Blue wire (T-568B)
+  Pin 5-8: CAN bus (not used for RS485)
 """
 
 import logging
