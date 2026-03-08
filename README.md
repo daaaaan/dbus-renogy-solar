@@ -2,6 +2,8 @@
 
 Venus OS driver for the **Renogy Rover Boost MPPT** solar charge controller. Reads data from the controller via RS485 Modbus RTU and publishes it as a `com.victronenergy.solarcharger` service on dbus, making it visible in the Victron GX interface and VRM portal.
 
+Integrates with the Venus OS **serial-starter** service — the adapter is detected automatically when plugged in, and the driver starts without manual intervention.
+
 **Tested with:** Renogy Rover Boost 10A 36V/48V (RCC10RVRB) on Cerbo GX running Venus OS.
 
 ---
@@ -17,6 +19,7 @@ Venus OS driver for the **Renogy Rover Boost MPPT** solar charge controller. Rea
 - Error code reporting
 - Appears natively in the Victron GX display and VRM portal as a solar charger
 - Automatic reconnect on serial errors
+- Integrates with Venus OS serial-starter: driver starts automatically when adapter is plugged in
 
 ---
 
@@ -74,61 +77,53 @@ The installer:
 - Checks you're on Venus OS
 - Installs `pyserial` if missing
 - Creates a symlink to `velib_python`
-- Creates a daemontools service in `/service/dbus-renogy-solar`
-- Creates a log directory at `/var/log/dbus-renogy-solar`
+- Writes `/data/conf/serial-starter.d/renogy.conf` — tells serial-starter to use this driver for Renogy adapters
+- Creates the service template in `/data/dbus-renogy-solar/service/` (survives firmware updates)
+- Symlinks the template into `/opt/victronenergy/service-templates/`
+- Updates `/data/rc.local` to restore the symlink after firmware updates
 
-### 3. Create a udev rule (critical — prevents Venus OS from hijacking the port)
+### 3. Create a udev rule to register the adapter with serial-starter
 
-Venus OS's `serial-starter` service automatically probes every `ttyUSB*` device with multiple protocols (VE.Direct, Modbus, GPS, etc.), which confuses the Renogy controller and prevents reliable communication. Fix this by giving your FTDI adapter a persistent name that serial-starter ignores:
+This rule tells Venus OS's serial-starter that your FTDI adapter is a Renogy MPPT device. Serial-starter will then start the driver automatically whenever the adapter is plugged in.
 
 ```bash
 # Find your FTDI serial number
-dmesg | grep -i "ftdi\|SerialNumber" | tail -5
+dmesg | grep SerialNumber | tail -5
 # Example output: usb 5-1: SerialNumber: AQ02EVVK
 
 # Create the udev rule (replace AQ02EVVK with your serial number)
 mkdir -p /data/etc/udev/rules.d
-cat > /data/etc/udev/rules.d/99-renogy.rules << 'EOF'
-SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{serial}=="AQ02EVVK", SYMLINK+="ttyRenogy", MODE="0666"
+cat > /data/etc/udev/rules.d/zz-renogy.rules << 'EOF'
+ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{serial}=="AQ02EVVK", ENV{VE_SERVICE}="renogy_mppt"
 EOF
 
 # Apply immediately
-cp /data/etc/udev/rules.d/99-renogy.rules /etc/udev/rules.d/
+cp /data/etc/udev/rules.d/zz-renogy.rules /etc/udev/rules.d/
 udevadm control --reload-rules
-udevadm trigger --subsystem-match=tty
 
-# Make persistent across reboots
-echo 'cp /data/etc/udev/rules.d/99-renogy.rules /etc/udev/rules.d/ && udevadm control --reload-rules' >> /data/rc.local
-
-# Confirm symlink created
-ls -la /dev/ttyRenogy
+# Make persistent across firmware updates
+echo 'cp /data/etc/udev/rules.d/zz-renogy.rules /etc/udev/rules.d/ && udevadm control --reload-rules' >> /data/rc.local
 ```
 
-### 4. Update the service run script to use the fixed port
+### 4. Replug the USB adapter
+
+Serial-starter detects devices via udev events. After the rule is in place:
 
 ```bash
-cat > /service/dbus-renogy-solar/run << 'EOF'
-#!/bin/bash
-exec 2>&1
-PORT=/dev/ttyRenogy
-if [ ! -e "$PORT" ]; then
-    echo "Renogy adapter not found at $PORT, waiting..."
-    sleep 10
-    exit 1
-fi
-exec python3 /data/dbus-renogy-solar/dbus-renogy-solar.py --port "$PORT"
-EOF
-chmod +x /service/dbus-renogy-solar/run
-svc -t /service/dbus-renogy-solar
+# Physically replug the USB adapter, then check:
+tail -f /data/log/serial-starter/current | tai64nlocal
 ```
+
+You should see serial-starter identify the device and start `dbus-renogy-solar`.
 
 ---
 
 ## Verifying It Works
 
-Check service status:
+The service name includes the port, e.g. `dbus-renogy-solar.ttyUSB0`:
+
 ```bash
-svstat /service/dbus-renogy-solar
+svstat /service/dbus-renogy-solar.ttyUSB0
 ```
 
 Watch live logs:
@@ -146,21 +141,26 @@ Inspect dbus values directly:
 dbus -y com.victronenergy.solarcharger.renogy_290 / GetValue
 ```
 
+Monitor serial-starter activity:
+```bash
+tail -f /data/log/serial-starter/current | tai64nlocal
+```
+
 ---
 
 ## Configuration
 
-The driver accepts command-line arguments:
+The driver accepts command-line arguments (set in `/data/dbus-renogy-solar/service/run`):
 
 | Argument | Default | Description |
 |---|---|---|
-| `--port` | `/dev/ttyUSB0` | Serial port |
+| `--port` | (set by serial-starter) | Serial port |
 | `--baud` | `9600` | Baud rate |
 | `--address` | `1` | Modbus slave address |
 | `--instance` | `290` | VRM device instance number |
 | `--debug` | off | Enable verbose logging |
 
-Edit `/service/dbus-renogy-solar/run` to change arguments.
+Edit `/data/dbus-renogy-solar/service/run` to change arguments. Replug the adapter or reboot for changes to take effect.
 
 ---
 
@@ -199,32 +199,42 @@ The driver reads the following Renogy holding registers (function code 0x03):
 
 ## Troubleshooting
 
-### Service not starting
+### Service not starting after replug
+
+Check serial-starter's log for errors:
 ```bash
-svstat /service/dbus-renogy-solar
-tail -20 /var/log/dbus-renogy-solar/current | tai64nlocal
+tail -20 /data/log/serial-starter/current | tai64nlocal
 ```
 
-### `/dev/ttyRenogy` not appearing
-The udev rule might not have been applied. Check the FTDI serial number matches:
+Confirm the udev rule is setting `VE_SERVICE` correctly:
 ```bash
-dmesg | grep SerialNumber
+udevadm info --query=property --name=/dev/ttyUSB0 | grep VE_SERVICE
+# Should show: VE_SERVICE=renogy_mppt
+```
+
+Check the service-templates symlink exists:
+```bash
+ls -la /opt/victronenergy/service-templates/dbus-renogy-solar
+```
+
+If the symlink is missing (e.g. after a firmware update before reboot), recreate it:
+```bash
+ln -sf /data/dbus-renogy-solar/service /opt/victronenergy/service-templates/dbus-renogy-solar
 ```
 
 ### "Short response" or "CRC mismatch" errors on startup
-These are normal for the first 1–2 polls while the serial buffer settles. If they persist, check wiring and confirm serial-starter is not interfering:
-```bash
-fuser /dev/ttyRenogy   # should be empty (just our service) or show our PID
-svstat /service/dbus-modbus-client.serial.ttyUSB0 2>/dev/null
-```
+
+These are normal for the first 1–2 polls while the serial buffer settles. If they persist, check wiring.
 
 ### FTDI adapter keeps disconnecting
-The CH341 USB-serial chip is unstable on Venus OS under load. Switch to an FTDI FT232R-based adapter. You can confirm the chip in use:
+
+The CH341 USB-serial chip is unstable on Venus OS under load. Switch to an FTDI FT232R-based adapter:
 ```bash
 dmesg | grep -i "ch341\|ftdi" | tail -5
 ```
 
 ### Checking FTDI latency (performance tuning)
+
 The FTDI default 16ms latency timer can cause buffering issues. Set it to 1ms:
 ```bash
 echo 1 > /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
@@ -236,20 +246,46 @@ This does not persist across reboots; add it to `/data/rc.local` if needed.
 
 ## How It Works
 
+### serial-starter integration
+
+Venus OS's `serial-starter` monitors USB serial devices. When an adapter is plugged in:
+
+1. udev fires an `add` event
+2. The udev rule sets `ENV{VE_SERVICE}="renogy_mppt"` on the device
+3. serial-starter reads this, looks up `renogy_mppt` in `/data/conf/serial-starter.d/renogy.conf`
+4. Finds the `dbus-renogy-solar` service template in `/opt/victronenergy/service-templates/`
+5. Creates a live service at `/service/dbus-renogy-solar.ttyUSBx/` with `TTY` replaced by the device name
+6. daemontools supervises the service
+
+### Driver architecture
+
 The driver runs two concurrent execution contexts:
 
 1. **Serial I/O thread** — opens the RS485 port, polls the Renogy controller every 2 seconds using Modbus RTU, and caches the result in a thread-safe dictionary. Running serial I/O in a dedicated thread is essential: Venus OS's GLib/dbus event loop sets `O_NONBLOCK` on process file descriptors, which causes `pyserial.read()` to return 0 bytes immediately instead of blocking for the controller's response.
 
 2. **GLib main loop** — runs the dbus service and updates all published values from the cache every 2 seconds. This is entirely non-blocking.
 
+### Persistence across firmware updates
+
+| Component | Location | Survives firmware update? |
+|---|---|---|
+| Driver code | `/data/dbus-renogy-solar/` | Yes |
+| Service template | `/data/dbus-renogy-solar/service/` | Yes |
+| serial-starter config | `/data/conf/serial-starter.d/renogy.conf` | Yes |
+| udev rule source | `/data/etc/udev/rules.d/zz-renogy.rules` | Yes |
+| udev rule live copy | `/etc/udev/rules.d/zz-renogy.rules` | No — restored by rc.local |
+| service-templates symlink | `/opt/victronenergy/service-templates/dbus-renogy-solar` | No — restored by rc.local |
+
 ---
 
 ## Uninstalling
 
 ```bash
-rm -rf /service/dbus-renogy-solar /var/log/dbus-renogy-solar
-rm -f /etc/udev/rules.d/99-renogy.rules /data/etc/udev/rules.d/99-renogy.rules
+rm -f /opt/victronenergy/service-templates/dbus-renogy-solar
+rm -f /data/conf/serial-starter.d/renogy.conf
+rm -rf /var/log/dbus-renogy-solar
+rm -f /etc/udev/rules.d/zz-renogy.rules /data/etc/udev/rules.d/zz-renogy.rules
 udevadm control --reload-rules
 ```
 
-Remove the line added to `/data/rc.local` manually if present.
+Remove the lines added to `/data/rc.local` manually.
