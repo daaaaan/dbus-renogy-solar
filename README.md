@@ -35,25 +35,25 @@ Integrates with the Venus OS **serial-starter** service — the adapter is detec
 
 The Renogy Rover Boost has an RJ45 RS485 port. Wire it to your USB-RS485 adapter as follows.
 
-**Renogy RJ45 pinout** (T-568B standard, pins numbered from left with clip facing away):
+**Renogy RJ45 pinout** (T-568B cable, pin 1 = Brown at the cable end):
 
-| Pin | Signal | Wire colour (T-568B) | Connect to |
-|-----|--------|----------------------|------------|
-| 1 | +5V | Orange/White | ⚠️ Do NOT connect |
-| 2 | RS485-A (TX/RX+) | Orange | A+ on adapter |
-| 3 | RS485-B (TX/RX−) | White/Green | B− on adapter |
-| 4 | GND | Blue | GND on adapter |
-| 5–8 | CAN bus | — | Not used |
+> **Note:** The Renogy manual shows the pinout from the socket (receptacle) view, which is mirrored compared to the cable end. The table below shows the correct pins as numbered from the **cable end** with the clip facing away.
 
-> **Important:** The Renogy manual diagram shows the RJ45 socket in receptacle view (mirrored). If you wire from the cable end, pins 2/3/4 as described above are correct.
+| Cable pin | Signal | Wire colour (T-568B) | Connect to |
+|-----------|--------|----------------------|------------|
+| 5 | GND | Blue/White | GND on adapter |
+| 6 | RS485-B (TX/RX−) | Green | B− on adapter |
+| 7 | RS485-A (TX/RX+) | Brown/White | A+ on adapter |
+| 8 | +5V | Brown | ⚠️ Do NOT connect |
+| 1–4 | CAN bus | — | Not used |
 
 **RS485 adapter wiring example** (4-pin screw terminal adapter with White/Green/Red/Black wires):
 
 | Adapter wire | Connect to |
 |---|---|
-| White (A+) | RJ45 pin 2 (Orange) |
-| Green (B−) | RJ45 pin 3 (White/Green) |
-| Black (GND) | RJ45 pin 4 (Blue) |
+| White (A+) | RJ45 pin 7 (Brown/White) |
+| Green (B−) | RJ45 pin 6 (Green) |
+| Black (GND) | RJ45 pin 5 (Blue/White) |
 | Red (VCC/5V) | Not connected |
 
 ---
