@@ -53,7 +53,7 @@ cat > "$SERVICE_DIR/run" << 'EOF'
 #!/bin/bash
 exec 2>&1
 # Detect the USB-RS485 adapter port
-PORT=$(ls /dev/ttyUSB* 2>/dev/null | head -1)
+PORT=$(ls /dev/ttyUSB* 2>/dev/null | head -n 1)
 if [ -z "$PORT" ]; then
     echo "No USB serial adapter found, waiting..."
     sleep 10

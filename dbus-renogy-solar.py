@@ -16,10 +16,12 @@ RS485 RJ45 pinout (from official Renogy manual):
   Pin 5-8: CAN bus (not used for RS485)
 """
 
+import fcntl
 import logging
 import os
 import sys
 import time
+import threading
 import serial
 import struct
 
@@ -87,16 +89,33 @@ log = logging.getLogger("dbus-renogy-solar")
 class RenogyModbus:
     """Minimal Modbus RTU client for Renogy charge controllers."""
 
-    def __init__(self, port, baudrate=9600, slave_addr=1, timeout=1.0):
+    def __init__(self, port, baudrate=9600, slave_addr=1, timeout=3.0):
         self.slave_addr = slave_addr
-        self.serial = serial.Serial(
-            port=port,
-            baudrate=baudrate,
-            bytesize=serial.EIGHTBITS,
-            parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE,
-            timeout=timeout,
-        )
+        self._port = port
+        self._baudrate = baudrate
+        self._timeout = timeout
+        self.serial = None
+        self._open()
+
+    def _open(self):
+        try:
+            if self.serial and self.serial.is_open:
+                self.serial.close()
+            self.serial = serial.Serial(
+                port=self._port,
+                baudrate=self._baudrate,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=self._timeout,
+            )
+        except serial.SerialException as e:
+            log.warning(f"Could not open {self._port}: {e}")
+            self.serial = None
+
+    def reconnect(self):
+        log.info(f"Reconnecting to {self._port}...")
+        self._open()
 
     def close(self):
         if self.serial and self.serial.is_open:
@@ -116,12 +135,23 @@ class RenogyModbus:
 
     def read_registers(self, start_addr, count):
         """Read `count` holding registers starting at `start_addr`. Returns list of 16-bit values."""
+        if not self.serial or not self.serial.is_open:
+            raise IOError("Serial port not open")
+
+        # GLib/dbus event loop sets O_NONBLOCK on process FDs; force blocking mode.
+        fd = self.serial.fileno()
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        if flags & os.O_NONBLOCK:
+            log.debug(f"Clearing O_NONBLOCK on serial FD (flags={flags:#x})")
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+
         request = struct.pack(">BBH H", self.slave_addr, 0x03, start_addr, count)
         crc = self._crc16(request)
         request += struct.pack("<H", crc)
 
         self.serial.reset_input_buffer()
         self.serial.write(request)
+        time.sleep(0.1)  # inter-frame gap for Modbus RTU
 
         # Response: addr(1) + func(1) + byte_count(1) + data(2*count) + crc(2)
         expected_len = 3 + 2 * count + 2
@@ -153,72 +183,109 @@ class RenogyModbus:
 
 
 class RenogySolarData:
-    """Reads and caches data from the Renogy Rover Boost."""
+    """Reads and caches data from the Renogy Rover Boost in a background thread.
+
+    Serial I/O runs in a dedicated thread so GLib's event loop cannot interfere
+    with blocking reads (GLib/dbus sets O_NONBLOCK on process FDs).
+    """
+
+    POLL_INTERVAL_S = 2.0
 
     def __init__(self, port, baudrate, slave_addr):
         self.modbus = RenogyModbus(port, baudrate, slave_addr)
-        self.data = {}
-        self._last_error = None
+        self._data = {}
+        self._connected = False
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True, name="renogy-poll")
+        self._thread.start()
+
+    @property
+    def data(self):
+        with self._lock:
+            return dict(self._data)
+
+    @property
+    def connected(self):
+        with self._lock:
+            return self._connected
 
     def close(self):
+        self._stop.set()
         self.modbus.close()
 
-    def poll(self):
-        """Read all relevant registers. Returns True on success."""
+    def _poll_loop(self):
+        while not self._stop.is_set():
+            self._do_poll()
+            self._stop.wait(self.POLL_INTERVAL_S)
+
+    def _do_poll(self):
         try:
             # Read main block: 0x0100 - 0x0109 (10 registers)
             regs = self.modbus.read_registers(REG_SOC, 10)
-            self.data["soc"] = regs[0]
-            self.data["batt_v"] = regs[1] / 10.0
-            self.data["batt_a"] = regs[2] / 100.0
+            new_data = {}
+            new_data["soc"] = regs[0]
+            new_data["batt_v"] = regs[1] / 10.0
+            new_data["batt_a"] = regs[2] / 100.0
             # Temperature: high byte = controller, low byte = battery
             # Each offset by 100 to handle negatives (value - 100 = actual temp)
             raw_temp = regs[3]
             ctrl_temp_sign = -1 if (raw_temp >> 15) & 1 else 1
             batt_temp_sign = -1 if (raw_temp >> 7) & 1 else 1
-            self.data["ctrl_temp"] = ctrl_temp_sign * ((raw_temp >> 8) & 0x7F)
-            self.data["batt_temp"] = batt_temp_sign * (raw_temp & 0x7F)
-            self.data["load_v"] = regs[4] / 10.0
-            self.data["load_a"] = regs[5] / 100.0
-            self.data["load_w"] = regs[6]
-            self.data["pv_v"] = regs[7] / 10.0
-            self.data["pv_a"] = regs[8] / 100.0
-            self.data["pv_w"] = regs[9]
+            new_data["ctrl_temp"] = ctrl_temp_sign * ((raw_temp >> 8) & 0x7F)
+            new_data["batt_temp"] = batt_temp_sign * (raw_temp & 0x7F)
+            new_data["load_v"] = regs[4] / 10.0
+            new_data["load_a"] = regs[5] / 100.0
+            new_data["load_w"] = regs[6]
+            new_data["pv_v"] = regs[7] / 10.0
+            new_data["pv_a"] = regs[8] / 100.0
+            new_data["pv_w"] = regs[9]
+
+            time.sleep(0.15)  # give controller time to recover between requests
 
             # Read daily stats: 0x010B - 0x0115 (11 registers)
             regs2 = self.modbus.read_registers(REG_DAILY_BATT_V_MIN, 11)
-            self.data["daily_batt_v_min"] = regs2[0] / 10.0
-            self.data["daily_batt_v_max"] = regs2[1] / 10.0
-            self.data["daily_charge_a_max"] = regs2[2] / 100.0
-            self.data["daily_discharge_a_max"] = regs2[3] / 100.0
-            self.data["daily_charge_w_max"] = regs2[4]
-            self.data["daily_discharge_w_max"] = regs2[5]
-            self.data["daily_charge_ah"] = regs2[6]
-            self.data["daily_discharge_ah"] = regs2[7]
-            self.data["daily_charge_wh"] = regs2[8]
-            self.data["daily_discharge_wh"] = regs2[9]
-            self.data["days_operating"] = regs2[10]
+            new_data["daily_batt_v_min"] = regs2[0] / 10.0
+            new_data["daily_batt_v_max"] = regs2[1] / 10.0
+            new_data["daily_charge_a_max"] = regs2[2] / 100.0
+            new_data["daily_discharge_a_max"] = regs2[3] / 100.0
+            new_data["daily_charge_w_max"] = regs2[4]
+            new_data["daily_discharge_w_max"] = regs2[5]
+            new_data["daily_charge_ah"] = regs2[6]
+            new_data["daily_discharge_ah"] = regs2[7]
+            new_data["daily_charge_wh"] = regs2[8]
+            new_data["daily_discharge_wh"] = regs2[9]
+            new_data["days_operating"] = regs2[10]
+
+            time.sleep(0.15)
 
             # Read totals: 0x0118 - 0x011B (4 registers)
             regs3 = self.modbus.read_registers(REG_TOTAL_CHARGE_AH_H, 4)
-            self.data["total_charge_ah"] = (regs3[0] << 16) | regs3[1]
-            self.data["total_charge_kwh"] = (regs3[2] << 16) | regs3[3]
+            new_data["total_charge_ah"] = (regs3[0] << 16) | regs3[1]
+            new_data["total_charge_kwh"] = (regs3[2] << 16) | regs3[3]
 
-            # Read charging state: 0x0120 (1 register)
-            regs4 = self.modbus.read_registers(REG_CHARGING_STATE, 1)
-            self.data["charging_state"] = regs4[0] & 0xFF
+            time.sleep(0.15)
 
-            # Read error code: 0x0121 - 0x0122 (2 registers)
-            regs5 = self.modbus.read_registers(REG_ERROR_CODE_H, 2)
-            self.data["error_code"] = (regs5[0] << 16) | regs5[1]
+            # Read charging state + error codes: 0x0120 - 0x0122 (3 registers, consolidated)
+            regs4 = self.modbus.read_registers(REG_CHARGING_STATE, 3)
+            new_data["charging_state"] = regs4[0] & 0xFF
+            new_data["error_code"] = (regs4[1] << 16) | regs4[2]
 
-            self._last_error = None
-            return True
+            with self._lock:
+                self._data = new_data
+                self._connected = True
+            log.info("Poll OK: SOC=%d%% PV=%.1fV/%.2fA Batt=%.1fV" % (
+                new_data["soc"], new_data["pv_v"], new_data["pv_a"], new_data["batt_v"]))
 
-        except Exception as e:
-            self._last_error = str(e)
+        except serial.SerialException as e:
             log.error(f"Poll failed: {e}")
-            return False
+            with self._lock:
+                self._connected = False
+            self.modbus.reconnect()
+        except Exception as e:
+            log.error(f"Poll failed: {e}")
+            with self._lock:
+                self._connected = False
 
 
 class DbusRenogySolarService:
@@ -276,7 +343,7 @@ class DbusRenogySolarService:
 
     def _update(self):
         try:
-            if self.renogy.poll():
+            if self.renogy.connected:
                 d = self.renogy.data
                 self._dbusservice["/Connected"] = 1
                 self._connected = True
