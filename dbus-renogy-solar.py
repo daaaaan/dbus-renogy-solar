@@ -310,10 +310,13 @@ class DbusRenogySolarService:
         self._dbusservice.add_path("/ProductId", 0)
         self._dbusservice.add_path("/ProductName", PRODUCT_NAME)
         self._dbusservice.add_path("/CustomName", PRODUCT_NAME)
-        # DVCC expects an integer firmware version (major<<16 | minor<<8 | patch)
+        # Venus DVCC checks FirmwareVersion to determine external control support:
+        # - Values with upper byte set (>= 0x10000) take the VE.CAN path (need >= 0x10200)
+        # - Otherwise take the VE.Direct path (need >= 0x129)
+        # Use VE.Direct-style encoding (0xMMmm) to stay in the 16-bit range.
         fw_parts = [int(x) for x in VERSION.split(".")]
-        fw_int = (fw_parts[0] << 16) | (fw_parts[1] << 8) | fw_parts[2]
-        self._dbusservice.add_path("/FirmwareVersion", fw_int)
+        fw_int = (fw_parts[0] << 8) | (fw_parts[1] << 4) | fw_parts[2]
+        self._dbusservice.add_path("/FirmwareVersion", max(fw_int, 0x129))
         self._dbusservice.add_path("/HardwareVersion", 0)
         self._dbusservice.add_path("/Serial", "")
         self._dbusservice.add_path("/Connected", 0)
